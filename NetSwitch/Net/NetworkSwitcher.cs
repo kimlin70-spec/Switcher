@@ -368,16 +368,20 @@ namespace NetSwitch.Net
                 return;
             }
 
-            // autoconfig method: stop Windows from managing the interface, then make sure it is really down.
-            try { Wifi.SetAutoconfig(false); }
+            // autoconfig method: first stop Windows from auto-connecting (this alone does NOT drop
+            // the current association), then disconnect explicitly, then verify.
+            bool autoconfOff = false;
+            try { Wifi.SetAutoconfig(false); autoconfOff = true; }
             catch (Exception ex) { Log.Warn("autoconfig 끄기 실패: " + ex.Message); }
             try { Wifi.Disconnect(); } catch (Exception ex) { Log.Warn("WlanDisconnect 실패: " + ex.Message); }
             var st = Wifi.WaitFor(s => !s.IsConnected && !s.IsConnecting, TimeSpan.FromSeconds(8), ct);
             Log.Info("와이파이 끊은 뒤 상태: " + st);
-            if (st.IsConnected)
+            if (st.IsConnected || !autoconfOff)
             {
-                // Last resort: take the whole adapter down.
-                Log.Warn("와이파이가 계속 연결되어 있어 어댑터를 끕니다");
+                // Either the disconnect did not take, or Windows is still allowed to auto-reconnect
+                // (e.g. group policy denies the autoconf setting). Fall back to taking the adapter down:
+                // slower to bring back, but it cannot overlap with the wire.
+                Log.Warn(st.IsConnected ? "와이파이가 계속 연결되어 있어 어댑터를 끕니다" : "자동 재연결을 막지 못해 와이파이 어댑터를 끕니다");
                 AdapterControl.Disable(WifiGuid);
                 AdapterControl.WaitFor(WifiGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
             }
