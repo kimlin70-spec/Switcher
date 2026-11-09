@@ -30,6 +30,7 @@ namespace NetSwitch
         private DateTime _lastWatchdogBalloon = DateTime.MinValue;
         private bool _ready;
         private NetObservation _lastObs;
+        private string _pendingNote;
 
         public TrayApp(Config cfg, string startupNote)
         {
@@ -66,13 +67,23 @@ namespace NetSwitch
             _menu.Items.Add(miExit);
             _menu.Opening += (s, e) => RefreshAutostartCheck();
 
+            // We run elevated while Explorer runs at medium integrity. Without this, UIPI would block the
+            // TaskbarCreated broadcast and the icon would never come back after an Explorer restart.
+            try
+            {
+                uint wmTaskbarCreated = Native.NativeMethods.RegisterWindowMessage("TaskbarCreated");
+                if (wmTaskbarCreated != 0) Native.NativeMethods.ChangeWindowMessageFilter(wmTaskbarCreated, Native.NativeMethods.MSGFLT_ADD);
+            }
+            catch (Exception ex) { Log.Warn("TaskbarCreated 메시지 필터 설정 실패: " + ex.Message); }
+
             _tray = new NotifyIcon
             {
                 Icon = _icons.Get(TrayIconKind.SwitchingA),
                 Text = "NetSwitch: 시작 중…",
                 ContextMenuStrip = _menu,
-                Visible = true
+                Visible = false
             };
+            ShowIconWhenTaskbarReady();
             // Double-click only (a single click must never switch).
             _tray.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) Toggle(); };
 
@@ -87,13 +98,36 @@ namespace NetSwitch
             };
             _animTimer.Start();
 
-            if (!string.IsNullOrEmpty(startupNote)) Balloon("NetSwitch", startupNote, ToolTipIcon.Info);
+            _pendingNote = startupNote;   // shown once the icon is visible (balloons on an invisible icon are dropped)
 
             // Discover adapters and make the physical state agree with the saved mode, off the UI thread.
             Task.Run(() => Startup());
         }
 
         // ------------------------------------------------------------------ startup
+
+        /// <summary>
+        /// At logon the task may start us before Explorer has created the taskbar; Shell_NotifyIcon(NIM_ADD)
+        /// then fails silently. Wait (bounded) for the taskbar window before making the icon visible.
+        /// </summary>
+        private void ShowIconWhenTaskbarReady()
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(90);
+            var t = new System.Windows.Forms.Timer { Interval = 500 };
+            t.Tick += (s, e) =>
+            {
+                bool taskbar = false;
+                try { taskbar = Native.NativeMethods.FindWindow("Shell_TrayWnd", null) != IntPtr.Zero; } catch { }
+                if (taskbar || DateTime.UtcNow >= deadline)
+                {
+                    t.Stop(); t.Dispose();
+                    if (!taskbar) Log.Warn("작업 표시줄을 찾지 못했지만 트레이 아이콘을 표시합니다");
+                    try { _tray.Visible = true; } catch (Exception ex) { Log.Error("트레이 아이콘 표시 실패", ex); }
+                    if (!string.IsNullOrEmpty(_pendingNote)) { Balloon("NetSwitch", _pendingNote, ToolTipIcon.Info); _pendingNote = null; }
+                }
+            };
+            t.Start();
+        }
 
         private void Startup()
         {

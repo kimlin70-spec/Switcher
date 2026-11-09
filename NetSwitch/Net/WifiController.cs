@@ -25,6 +25,7 @@ namespace NetSwitch.Net
     internal sealed class WifiController
     {
         private readonly Guid _guid;
+        private static bool _accessDeniedLogged;
         public Guid InterfaceGuid => _guid;
 
         public WifiController(Guid interfaceGuid) { _guid = interfaceGuid; }
@@ -101,6 +102,16 @@ namespace NetSwitch.Net
                             var attr = (WLAN_CONNECTION_ATTRIBUTES)Marshal.PtrToStructure(pData, typeof(WLAN_CONNECTION_ATTRIBUTES));
                             st.ProfileName = attr.strProfileName ?? "";
                             st.Ssid = attr.wlanAssociationAttributes.dot11Ssid.ToString();
+                        }
+                        else if (rc == ERROR_ACCESS_DENIED)
+                        {
+                            // Windows 11 24H2+: reading the connected SSID/profile needs Location permission.
+                            // The connection state itself (from WlanEnumInterfaces) is still valid.
+                            if (!_accessDeniedLogged)
+                            {
+                                _accessDeniedLogged = true;
+                                Log.Warn("WlanQueryInterface(current_connection) 접근 거부(5): Windows 설정 > 개인 정보 > 위치에서 데스크톱 앱의 위치 접근이 꺼져 있으면 연결된 SSID/프로필 이름을 읽을 수 없습니다. 돌아올 와이파이는 저장된 프로필 목록의 첫 번째를 씁니다.");
+                            }
                         }
                         else if (rc != ERROR_INVALID_STATE)
                         {

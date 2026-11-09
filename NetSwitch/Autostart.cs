@@ -55,13 +55,19 @@ namespace NetSwitch
             using (var id = WindowsIdentity.GetCurrent()) sid = id.User?.Value ?? id.Name;
 
             var exe = AppPaths.ExePath;
-            var xml = BuildTaskXml(exe, sid);
             var tmp = Path.Combine(Path.GetTempPath(), "NetSwitch-task-" + Guid.NewGuid().ToString("N") + ".xml");
             try
             {
-                // schtasks expects the XML file as UTF-16 (with BOM) when the declaration says UTF-16.
-                File.WriteAllText(tmp, xml, new UnicodeEncoding(false, true));
+                // Task Scheduler exports tasks as UTF-16 with BOM; import that first. Some builds are reported
+                // to accept only UTF-8, so fall back to a UTF-8 file whose declaration matches its bytes.
+                File.WriteAllText(tmp, BuildTaskXml(exe, sid, "UTF-16"), new UnicodeEncoding(false, true));
                 var r = RunSchtasks("/Create /TN \"" + TaskName + "\" /XML \"" + tmp + "\" /F");
+                if (r.ExitCode != 0)
+                {
+                    Log.Warn("UTF-16 작업 XML 등록 실패 (코드 " + r.ExitCode + "): " + (r.StdErr + " " + r.StdOut).Trim() + " -> UTF-8로 재시도");
+                    File.WriteAllText(tmp, BuildTaskXml(exe, sid, "UTF-8"), new UTF8Encoding(true));
+                    r = RunSchtasks("/Create /TN \"" + TaskName + "\" /XML \"" + tmp + "\" /F");
+                }
                 if (r.ExitCode != 0)
                     throw new InvalidOperationException("작업 스케줄러 등록 실패 (코드 " + r.ExitCode + "): " + (r.StdErr + " " + r.StdOut).Trim());
                 Log.Info("작업 스케줄러에 등록: " + exe);
@@ -88,10 +94,10 @@ namespace NetSwitch
             return r.ExitCode == 0;
         }
 
-        private static string BuildTaskXml(string exePath, string userId)
+        private static string BuildTaskXml(string exePath, string userId, string encodingName)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-16\"?>");
+            sb.AppendLine("<?xml version=\"1.0\" encoding=\"" + encodingName + "\"?>");
             sb.AppendLine("<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">");
             sb.AppendLine("  <RegistrationInfo>");
             sb.AppendLine("    <Author>NetSwitch</Author>");
