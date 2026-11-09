@@ -48,7 +48,7 @@ namespace NetSwitch.Net
     {
         private readonly Config _cfg;
         private readonly object _gate = new object();
-        private volatile bool _switching;
+        private int _switching;   // 0/1, Interlocked
 
         public Guid EthernetGuid { get; private set; }
         public Guid WifiGuid { get; private set; }
@@ -58,7 +58,7 @@ namespace NetSwitch.Net
         public bool Discovered => Wifi != null;
 
         public NetMode CurrentMode { get; private set; } = NetMode.Unknown;
-        public bool IsSwitching => _switching;
+        public bool IsSwitching => Volatile.Read(ref _switching) == 1;
 
         public event Action<string> Progress;   // Korean status text for the tray
 
@@ -257,30 +257,49 @@ namespace NetSwitch.Net
                 {
                     if (mode == NetMode.Lan)
                     {
-                        if (o.Ethernet == null && !o.WifiConnected)
+                        if (o.Ethernet == null)
                         {
                             // Booted without the dock in LAN mode: there is no wire to use, so go back to Wi-Fi.
                             Log.Warn("시작: 업무망 모드지만 유선 랜 어댑터가 없음 -> 인터넷(와이파이) 모드로 전환");
                             mode = NetMode.Wifi;
-                            BringUpWifi(ct, waitForIp: false, connectWait: TimeSpan.FromSeconds(12));
+                            if (!o.WifiConnected) BringUpWifi(ct, waitForIp: false, connectWait: TimeSpan.FromSeconds(12));
+                            else if (_cfg.WifiMethod == WifiMethod.Autoconfig && Wifi.QueryAutoconfigEnabled() == false) Wifi.SetAutoconfig(true);
                             note = "유선 랜 어댑터가 없어 인터넷(와이파이) 모드로 시작했습니다.";
                         }
                         else
                         {
-                            if (o.WifiConnected || o.WifiConnecting)
+                            bool wifiCut = false;
+                            try
                             {
-                                Log.Info("시작: 업무망 모드인데 와이파이가 연결됨 -> 끊음 (자동구성 설정이 재부팅 후 유지되지 않았을 수 있음)");
-                                CutWifi(ct);
-                                note = note ?? "업무망 모드를 유지하기 위해 와이파이를 끊었습니다.";
+                                if (o.WifiConnected || o.WifiConnecting)
+                                {
+                                    Log.Info("시작: 업무망 모드인데 와이파이가 연결됨 -> 끊음 (자동구성 설정이 재부팅 후 유지되지 않았을 수 있음)");
+                                    CutWifi(ct);
+                                    wifiCut = true;
+                                    note = note ?? "업무망 모드를 유지하기 위해 와이파이를 끊었습니다.";
+                                }
+                                else if (_cfg.WifiMethod == WifiMethod.Autoconfig && o.Wifi.InterfacePresent && Wifi.QueryAutoconfigEnabled() == true)
+                                {
+                                    Wifi.SetAutoconfig(false);   // not connected yet, but Windows could reconnect any moment
+                                }
+                                else if (_cfg.WifiMethod == WifiMethod.Adapter && o.WifiAdapter != null && !o.WifiAdapter.IsDisabled)
+                                {
+                                    AdapterControl.Disable(WifiGuid);
+                                }
+                                if (!o.EthernetEnabled)
+                                {
+                                    Log.Info("시작: 업무망 모드인데 유선 랜이 꺼져 있음 -> 켬");
+                                    AdapterControl.Enable(EthernetGuid);
+                                }
                             }
-                            else if (_cfg.WifiMethod == WifiMethod.Autoconfig && o.Wifi.InterfacePresent && Wifi.QueryAutoconfigEnabled() == true)
+                            catch (OperationCanceledException) { throw; }
+                            catch (Exception ex) when (wifiCut)
                             {
-                                Wifi.SetAutoconfig(false);   // not connected yet, but Windows could reconnect any moment
-                            }
-                            if (o.Ethernet != null && !o.EthernetEnabled)
-                            {
-                                Log.Info("시작: 업무망 모드인데 유선 랜이 꺼져 있음 -> 켬");
-                                AdapterControl.Enable(EthernetGuid);
+                                // Wi-Fi is already down and the wire could not be brought up: do not strand the user.
+                                Log.Error("시작: 와이파이를 끊은 뒤 유선 랜을 켜지 못함 -> 와이파이로 되돌림", ex);
+                                mode = NetMode.Wifi;
+                                RollbackToWifi(ct, wireTouched: true);
+                                note = "유선 랜을 켜지 못해 인터넷(와이파이) 모드로 시작했습니다: " + ex.Message;
                             }
                         }
                     }
@@ -343,18 +362,14 @@ namespace NetSwitch.Net
         /// <summary>Marks the switcher busy. Returns false if a switch/restore is already running.</summary>
         public bool TryBeginSwitch()
         {
-            lock (_gate)
-            {
-                if (_switching) return false;
-                _switching = true;
-                return true;
-            }
+            // Lock-free: the UI thread calls this and must never wait for a watchdog intervention.
+            return Interlocked.CompareExchange(ref _switching, 1, 0) == 0;
         }
 
         /// <summary>Switch to <paramref name="target"/>. Blocking; call from a worker thread after TryBeginSwitch(). Throws SwitchException on failure, SwitchWarning on success-with-caveat.</summary>
         public void SwitchTo(NetMode target, CancellationToken ct)
         {
-            if (!_switching) throw new InvalidOperationException("TryBeginSwitch() 먼저");
+            if (!IsSwitching) throw new InvalidOperationException("TryBeginSwitch() 먼저");
             Monitor.Enter(_gate);
             try
             {
@@ -376,7 +391,7 @@ namespace NetSwitch.Net
             }
             finally
             {
-                _switching = false;
+                Interlocked.Exchange(ref _switching, 0);
                 Monitor.Exit(_gate);
             }
         }
@@ -417,7 +432,10 @@ namespace NetSwitch.Net
                 CutWifi(ct);
                 var check = Wifi.Query();
                 if (check.IsConnected)
-                    throw new SwitchException("와이파이가 끊어지지 않아 전환을 중단했습니다. (유선 랜은 건드리지 않았습니다)");
+                {
+                    RollbackToWifi(ct, wireTouched: false);   // undo autoconf-off / pending adapter disable
+                    throw new SwitchException("와이파이가 끊어지지 않아 전환을 중단했습니다. 와이파이 설정은 원래대로 되돌렸고 유선 랜은 건드리지 않았습니다.");
+                }
 
                 // 2) Wire on.
                 Report("유선 랜 켜는 중…");
@@ -427,10 +445,7 @@ namespace NetSwitch.Net
                     AdapterControl.Enable(EthernetGuid);
                     eth = AdapterControl.WaitFor(EthernetGuid, a => a.IsEnabled, TimeSpan.FromSeconds(15), ct);
                     if (eth == null || !eth.IsEnabled)
-                    {
-                        RollbackToWifi(ct, wireTouched: true);
-                        throw new SwitchException("유선 랜 어댑터를 켜지 못했습니다. 와이파이로 되돌렸습니다.");
-                    }
+                        throw new SwitchException("유선 랜 어댑터를 켜지 못했습니다. " + RollbackToWifi(ct, wireTouched: true));
                 }
                 wireTouched = true;
 
@@ -441,8 +456,7 @@ namespace NetSwitch.Net
                 {
                     Log.Warn("링크 없음 -> 롤백");
                     Report("랜선이 없어 와이파이로 되돌리는 중…");
-                    RollbackToWifi(ct, wireTouched: true);
-                    throw new SwitchException("랜선 연결이 감지되지 않습니다. 랜선을 확인하세요. 와이파이로 되돌렸습니다.");
+                    throw new SwitchException("랜선 연결이 감지되지 않습니다. 랜선을 확인하세요. " + RollbackToWifi(ct, wireTouched: true));
                 }
             }
             catch (SwitchException) { throw; }
@@ -457,8 +471,9 @@ namespace NetSwitch.Net
             catch (Exception ex)
             {
                 Log.Error("업무망 전환 중 예외 -> 롤백", ex);
-                try { RollbackToWifi(ct, wireTouched); } catch (Exception rb) { Log.Error("롤백 실패", rb); }
-                throw new SwitchException("업무망으로 전환하지 못했습니다(" + ex.Message + "). 와이파이로 되돌렸습니다.", ex);
+                string rb;
+                try { rb = RollbackToWifi(ct, wireTouched); } catch (Exception rbEx) { Log.Error("롤백 실패", rbEx); rb = "되돌리기도 실패했습니다. '원래대로 복구'를 실행하세요."; }
+                throw new SwitchException("업무망으로 전환하지 못했습니다(" + ex.Message + "). " + rb, ex);
             }
 
             // 4) Wait for a real address (DHCP / 802.1X). We are in LAN mode from here on.
@@ -477,8 +492,7 @@ namespace NetSwitch.Net
             if (eth != null && !eth.IsDisabled)
             {
                 AdapterControl.Disable(EthernetGuid);
-                eth = AdapterControl.WaitFor(EthernetGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
-                if (eth != null && !eth.IsDisabled)
+                if (!ConfirmWireOff(ct))
                     throw new SwitchException("유선 랜을 끄지 못해 전환을 중단했습니다. (와이파이는 건드리지 않았습니다)");
             }
             else if (eth == null)
@@ -506,22 +520,51 @@ namespace NetSwitch.Net
             }
         }
 
-        /// <summary>Undo a half-done switch to LAN: turn the wire back off (if we touched it) and bring Wi-Fi back.</summary>
-        private void RollbackToWifi(CancellationToken ct, bool wireTouched)
+        /// <summary>
+        /// Undo a half-done switch to LAN: turn the wire back off (if we touched it) and bring Wi-Fi back.
+        /// Returns a Korean sentence describing the outcome for the user. Never brings Wi-Fi up while the
+        /// wire is confirmed to be still on.
+        /// </summary>
+        private string RollbackToWifi(CancellationToken ct, bool wireTouched)
         {
             if (wireTouched && EthernetGuid != Guid.Empty)
             {
+                bool off = false;
                 try
                 {
                     AdapterControl.Disable(EthernetGuid);
-                    AdapterControl.WaitFor(EthernetGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
+                    off = ConfirmWireOff(ct);
                 }
                 catch (Exception ex) { Log.Warn("롤백 중 유선 끄기 실패: " + ex.Message); }
+                if (!off)
+                    return "유선 랜을 다시 끄지 못해 와이파이를 켜지 않았습니다(두 망이 겹치지 않게 하기 위함). 트레이 메뉴의 '원래대로 복구'를 실행하세요.";
             }
-            try { BringUpWifi(ct, waitForIp: false, connectWait: TimeSpan.FromSeconds(_cfg.WifiConnectWaitSeconds)); }
-            catch (SwitchWarning w) { Log.Warn("롤백 경고: " + w.Message); }
+            try
+            {
+                BringUpWifi(ct, waitForIp: false, connectWait: TimeSpan.FromSeconds(_cfg.WifiConnectWaitSeconds));
+                return "와이파이로 되돌렸습니다.";
+            }
+            catch (SwitchWarning w) { Log.Warn("롤백 경고: " + w.Message); return "와이파이를 켰지만 자동으로 연결되지 않았습니다. 작업 표시줄에서 직접 연결하세요."; }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { Log.Error("와이파이 롤백 실패", ex); }
+            catch (Exception ex) { Log.Error("와이파이 롤백 실패", ex); return "와이파이 복구에 실패했습니다(" + ex.Message + "). '원래대로 복구'를 실행하세요."; }
+        }
+
+        /// <summary>
+        /// True only when the wired adapter is confirmed disabled or gone. A WMI hiccup (query failures
+        /// during the wait) counts as "unknown" and therefore false: we never assume the wire is off.
+        /// </summary>
+        private bool ConfirmWireOff(CancellationToken ct)
+        {
+            var eth = AdapterControl.WaitFor(EthernetGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
+            if (eth != null) return eth.IsDisabled;
+            try
+            {
+                var all = NetAdapterInfo.QueryAll();
+                var again = all.Find(a => a.InterfaceGuid == EthernetGuid);
+                if (again == null) { Log.Info("유선 랜 어댑터가 사라짐(분리됨) -> 꺼진 것으로 간주"); return true; }
+                return again.IsDisabled;
+            }
+            catch (Exception ex) { Log.Warn("유선 상태 재확인 실패: " + ex.Message); return false; }
         }
 
         // ---------------------------------------------------------------------
@@ -655,11 +698,11 @@ namespace NetSwitch.Net
 
         public string Watchdog(NetObservation o, CancellationToken ct)
         {
-            if (_switching || CurrentMode == NetMode.Unknown) return null;
+            if (IsSwitching || CurrentMode == NetMode.Unknown) return null;
             if (!Monitor.TryEnter(_gate)) return null;
             try
             {
-                if (_switching) return null;
+                if (IsSwitching) return null;
                 if (CurrentMode == NetMode.Lan && (o.WifiConnected || o.WifiConnecting))
                 {
                     Log.Warn("감시: 업무망 모드인데 와이파이가 다시 연결됨(" + o.Wifi + ") -> 끊음");
@@ -711,7 +754,7 @@ namespace NetSwitch.Net
             }
             finally
             {
-                _switching = false;
+                Interlocked.Exchange(ref _switching, 0);
                 Monitor.Exit(_gate);
             }
         }

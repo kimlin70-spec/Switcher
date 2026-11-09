@@ -36,6 +36,7 @@ namespace NetSwitch
         private bool _startupRunning;
         private NetObservation _lastObs;
         private string _pendingNote;
+        private Task _worker;                        // current switch/restore task, awaited briefly on exit
 
         public TrayApp(Config cfg, string startupNote)
         {
@@ -214,7 +215,7 @@ namespace NetSwitch
             UpdateTooltip();
             Balloon("전환 중", NetworkSwitcher.Describe(target) + "으로 전환합니다…", ToolTipIcon.Info);
 
-            Task.Run(() =>
+            _worker = Task.Run(() =>
             {
                 string warn = null, error = null;
                 try { _switcher.SwitchTo(target, _cts.Token); }
@@ -362,14 +363,15 @@ namespace NetSwitch
 
         private void RestoreDefaults()
         {
-            if (!_ready || _busy) return;
+            if (_busy) return;
+            if (!_switcher.Discovered) { Balloon("NetSwitch", "아직 어댑터를 찾지 못해 복구할 수 없습니다.", ToolTipIcon.Warning); return; }
             var r = Msg("와이파이와 유선 랜을 모두 켜고 Windows 기본 상태로 되돌립니다.\n두 망이 동시에 연결될 수 있습니다.\n\n계속할까요?",
                 "원래대로 복구", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             if (r != DialogResult.Yes) return;
             if (_busy) return;   // a switch may have started while the dialog was open
             SetBusy(true);
             _animTimer.Start();
-            Task.Run(() =>
+            _worker = Task.Run(() =>
             {
                 string err = null;
                 try { _switcher.RestoreDefaults(_cts.Token); }
@@ -431,12 +433,17 @@ namespace NetSwitch
                             "와이파이를 다시 쓰려면 NetSwitch를 다시 실행하거나 '원래대로 복구'를 쓰세요.\n\n그래도 종료할까요?",
                             "NetSwitch 종료", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 if (r != DialogResult.Yes) return;
+                if (_busy) { Balloon("NetSwitch", "전환이 끝난 뒤 종료하세요.", ToolTipIcon.Warning); return; }   // a switch may have started while the dialog was open
             }
             Log.Info("사용자 종료");
-            _cts.Cancel();
             _watchdogTimer.Stop();
             _animTimer.Stop();
             _retryTimer.Stop();
+            // Let an in-flight watchdog intervention finish so we never exit half-switched; do not cancel it.
+            var spin = DateTime.UtcNow.AddSeconds(30);
+            while ((Volatile.Read(ref _watchdogBusy) != 0 || _switcher.IsSwitching) && DateTime.UtcNow < spin) Thread.Sleep(100);
+            try { _worker?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            _cts.Cancel();
             _tray.Visible = false;
             ExitThread();
         }
@@ -470,7 +477,17 @@ namespace NetSwitch
 
         private void Balloon(string title, string text, ToolTipIcon icon)
         {
-            try { _tray.ShowBalloonTip(5000, title, text, icon); } catch { }
+            try
+            {
+                if (!_tray.Visible)
+                {
+                    // Balloons on an invisible icon are discarded; keep the text until the taskbar is there.
+                    _pendingNote = string.IsNullOrEmpty(_pendingNote) ? text : _pendingNote + "\n" + text;
+                    return;
+                }
+                _tray.ShowBalloonTip(5000, title, text, icon);
+            }
+            catch { }
         }
 
         /// <summary>Message box for a tray app: no owner window, shown centred and on top.</summary>

@@ -28,6 +28,7 @@ namespace NetSwitch
     internal sealed class Config
     {
         private readonly Dictionary<string, string> _values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly object _sync = new object();   // read/written from the UI thread, the switch worker and the watchdog
 
         public static string ConfigPath => Path.Combine(AppPaths.DataDir, "config.txt");
 
@@ -69,12 +70,15 @@ namespace NetSwitch
         public string EthernetGuid { get => Get("ethernet_guid"); set => Set("ethernet_guid", value); }
         public string WifiGuid { get => Get("wifi_guid"); set => Set("wifi_guid", value); }
 
-        public string Get(string key) => _values.TryGetValue(key, out var v) ? v : string.Empty;
+        public string Get(string key)
+        {
+            lock (_sync) return _values.TryGetValue(key, out var v) ? v : string.Empty;
+        }
 
         public void Set(string key, string value)
         {
             if (value == null) value = string.Empty;
-            _values[key] = value.Trim();
+            lock (_sync) _values[key] = value.Trim();
         }
 
         private int GetInt(string key, int def, int min, int max)
@@ -134,11 +138,14 @@ namespace NetSwitch
                 sb.AppendLine("# autostart         : true면 Windows 시작 시 자동 실행(작업 스케줄러) 유지");
                 sb.AppendLine("# 아래 값들은 프로그램이 자동으로 관리합니다: mode, restored, last_wifi_profile, ethernet_guid, wifi_guid");
                 sb.AppendLine();
-                var keys = new List<string>(_values.Keys);
-                keys.Sort(StringComparer.OrdinalIgnoreCase);
-                foreach (var k in keys)
-                    sb.Append(k).Append('=').AppendLine(_values[k]);
-                File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
+                lock (_sync)
+                {
+                    var keys = new List<string>(_values.Keys);
+                    keys.Sort(StringComparer.OrdinalIgnoreCase);
+                    foreach (var k in keys)
+                        sb.Append(k).Append('=').AppendLine(_values[k]);
+                    File.WriteAllText(ConfigPath, sb.ToString(), new UTF8Encoding(false));
+                }
             }
             catch (Exception ex)
             {

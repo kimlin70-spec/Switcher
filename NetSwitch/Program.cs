@@ -33,7 +33,7 @@ namespace NetSwitch
             if (fromTask) Log.Info("작업 스케줄러에서 시작됨");
 
             var cfg = Config.Load();
-            WarnIfBadLocation();
+            if (!elevated && !fromTask) WarnIfBadLocation();   // launcher only; never block a task-started instance
 
             // ---- everything below needs administrator rights ----
             if (!elevated)
@@ -44,6 +44,14 @@ namespace NetSwitch
                     MessageBox.Show("NetSwitch가 이미 트레이에서 실행 중입니다.\n작업 표시줄 오른쪽의 숨겨진 아이콘(^)도 확인해 보세요.",
                         "NetSwitch", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return 0;
+                }
+                if (fromTask)
+                {
+                    // The task itself started us but we are not elevated: this account is not an administrator.
+                    Log.Error("작업 스케줄러가 시작했지만 관리자 권한이 없습니다. 이 계정은 관리자가 아닙니다.");
+                    MessageBox.Show("NetSwitch는 관리자 계정에서만 동작합니다.\n이 Windows 계정은 관리자 권한이 없어 유선 랜을 켜고 끌 수 없습니다.",
+                        "NetSwitch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return 1;
                 }
                 // Preferred path: the registered task starts us elevated without UAC.
                 if (!restore && !installOnly && !uninstallOnly && Autostart.IsRegisteredForThisExe())
