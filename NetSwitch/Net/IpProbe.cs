@@ -13,19 +13,24 @@ namespace NetSwitch.Net
         public IPAddress Gateway;      // first IPv4 gateway, or null
         public bool HasUsableIp => Address != null;
         public override string ToString() => (InterfaceUp ? "up" : "down") + " ip=" + (Address?.ToString() ?? "-") + " gw=" + (Gateway?.ToString() ?? "-");
+        public string ToKorean() => Address == null ? "IP 없음" : "IP " + Address + (Gateway != null ? ", 게이트웨이 " + Gateway : ", 게이트웨이 없음");
     }
 
     /// <summary>Reads IPv4 configuration of an interface via System.Net.NetworkInformation.</summary>
     internal static class IpProbe
     {
-        public static IpStatus Query(Guid interfaceGuid)
+        public static NetworkInterface[] Snapshot()
+        {
+            try { return NetworkInterface.GetAllNetworkInterfaces(); }
+            catch (Exception ex) { Log.Warn("NetworkInterface 조회 실패: " + ex.Message); return new NetworkInterface[0]; }
+        }
+
+        public static IpStatus Query(Guid interfaceGuid) => Query(Snapshot(), interfaceGuid);
+
+        public static IpStatus Query(NetworkInterface[] all, Guid interfaceGuid)
         {
             var st = new IpStatus();
             var target = interfaceGuid.ToString("B");
-            NetworkInterface[] all;
-            try { all = NetworkInterface.GetAllNetworkInterfaces(); }
-            catch (Exception ex) { Log.Warn("NetworkInterface 조회 실패: " + ex.Message); return st; }
-
             foreach (var ni in all)
             {
                 if (!string.Equals(ni.Id, target, StringComparison.OrdinalIgnoreCase)) continue;

@@ -12,6 +12,7 @@ namespace NetSwitch.Native
     {
         public const uint ERROR_SUCCESS = 0;
         public const uint ERROR_ACCESS_DENIED = 5;
+        public const uint ERROR_NOT_READY = 21;
         public const uint ERROR_INVALID_STATE = 5023;
         public const uint ERROR_NOT_FOUND = 1168;
 

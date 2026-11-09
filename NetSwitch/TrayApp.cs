@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -19,16 +20,20 @@ namespace NetSwitch
         private readonly ToolStripMenuItem _miSwitch;
         private readonly ToolStripMenuItem _miAutostart;
         private readonly ToolStripMenuItem _miRestore;
-        private readonly Form _sync;                 // hidden; gives us a UI-thread handle for BeginInvoke
+        private readonly ToolStripMenuItem _miExit;
+        private readonly Form _sync;                 // hidden, never shown; gives us a UI-thread handle for BeginInvoke
         private readonly System.Windows.Forms.Timer _watchdogTimer;
         private readonly System.Windows.Forms.Timer _animTimer;
+        private readonly System.Windows.Forms.Timer _retryTimer;
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
 
         private int _watchdogBusy;                   // 0/1, interlocked
+        private bool _busy;                          // UI-thread flag: a switch or restore is in flight
         private bool _animFrame;
         private string _progressText = "";
         private DateTime _lastWatchdogBalloon = DateTime.MinValue;
         private bool _ready;
+        private bool _startupRunning;
         private NetObservation _lastObs;
         private string _pendingNote;
 
@@ -38,22 +43,22 @@ namespace NetSwitch
             _switcher = new NetworkSwitcher(cfg);
             _switcher.Progress += text => Post(() => { _progressText = text; UpdateTooltip(); });
 
-            _sync = new Form { ShowInTaskbar = false, WindowState = FormWindowState.Minimized, FormBorderStyle = FormBorderStyle.FixedToolWindow, Opacity = 0 };
-            var _ = _sync.Handle; // force handle creation on this (UI) thread
+            _sync = new Form { ShowInTaskbar = false, FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual, Location = new System.Drawing.Point(-10000, -10000), Size = new System.Drawing.Size(1, 1) };
+            var _ = _sync.Handle; // force handle creation on this (UI) thread; the form is never shown
 
             _miStatus = new ToolStripMenuItem("상태 확인 중…") { Enabled = false };
             _miSwitch = new ToolStripMenuItem("전환") { Enabled = false };
             _miSwitch.Click += (s, e) => Toggle();
-            _miAutostart = new ToolStripMenuItem("Windows 시작 시 자동 실행") { CheckOnClick = false };
+            _miAutostart = new ToolStripMenuItem("Windows 시작 시 자동 실행") { CheckOnClick = false, Enabled = false };
             _miAutostart.Click += (s, e) => ToggleAutostart();
-            _miRestore = new ToolStripMenuItem("원래대로 복구 (와이파이·유선 모두 켬)");
+            _miRestore = new ToolStripMenuItem("원래대로 복구 (와이파이·유선 모두 켬)") { Enabled = false };
             _miRestore.Click += (s, e) => RestoreDefaults();
-            var miLog = new ToolStripMenuItem("로그 폴더 열기");
+            var miLog = new ToolStripMenuItem("설정·로그 폴더 열기");
             miLog.Click += (s, e) => OpenDataFolder();
             var miAbout = new ToolStripMenuItem("정보");
             miAbout.Click += (s, e) => ShowAbout();
-            var miExit = new ToolStripMenuItem("종료");
-            miExit.Click += (s, e) => ExitApp();
+            _miExit = new ToolStripMenuItem("종료");
+            _miExit.Click += (s, e) => ExitApp();
 
             _menu = new ContextMenuStrip();
             _menu.Items.Add(_miStatus);
@@ -64,7 +69,7 @@ namespace NetSwitch
             _menu.Items.Add(miLog);
             _menu.Items.Add(miAbout);
             _menu.Items.Add(new ToolStripSeparator());
-            _menu.Items.Add(miExit);
+            _menu.Items.Add(_miExit);
             _menu.Opening += (s, e) => RefreshAutostartCheck();
 
             // We run elevated while Explorer runs at medium integrity. Without this, UIPI would block the
@@ -83,9 +88,10 @@ namespace NetSwitch
                 ContextMenuStrip = _menu,
                 Visible = false
             };
-            ShowIconWhenTaskbarReady();
             // Double-click only (a single click must never switch).
             _tray.MouseDoubleClick += (s, e) => { if (e.Button == MouseButtons.Left) Toggle(); };
+            _pendingNote = startupNote;   // shown once the icon is visible (balloons on an invisible icon are dropped)
+            ShowIconWhenTaskbarReady();
 
             _watchdogTimer = new System.Windows.Forms.Timer { Interval = 3000 };
             _watchdogTimer.Tick += (s, e) => RunWatchdog();
@@ -98,10 +104,19 @@ namespace NetSwitch
             };
             _animTimer.Start();
 
-            _pendingNote = startupNote;   // shown once the icon is visible (balloons on an invisible icon are dropped)
+            // Retry discovery while it has not succeeded (e.g. WMI not ready right after logon).
+            _retryTimer = new System.Windows.Forms.Timer { Interval = 15000 };
+            _retryTimer.Tick += (s, e) => { if (!_ready) StartStartup(); };
 
-            // Discover adapters and make the physical state agree with the saved mode, off the UI thread.
-            Task.Run(() => Startup());
+            // React quickly to cable/dock/Wi-Fi changes instead of waiting for the next 3 s tick.
+            try
+            {
+                NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+                NetworkChange.NetworkAvailabilityChanged += (s, e) => OnNetworkChanged(s, EventArgs.Empty);
+            }
+            catch (Exception ex) { Log.Warn("네트워크 변경 알림 등록 실패: " + ex.Message); }
+
+            StartStartup();
         }
 
         // ------------------------------------------------------------------ startup
@@ -129,6 +144,14 @@ namespace NetSwitch
             t.Start();
         }
 
+        private void StartStartup()
+        {
+            if (_ready || _startupRunning) return;
+            _startupRunning = true;
+            _animTimer.Start();
+            Task.Run(() => Startup());
+        }
+
         private void Startup()
         {
             string note = null;
@@ -143,38 +166,53 @@ namespace NetSwitch
                 Log.Error("시작 실패", ex);
                 Post(() =>
                 {
+                    _startupRunning = false;
                     _animTimer.Stop();
                     _tray.Icon = _icons.Get(TrayIconKind.Error);
-                    _tray.Text = Trunc("NetSwitch: 오류");
+                    _tray.Text = Trunc("NetSwitch: 오류 (15초 후 다시 시도)");
                     _miStatus.Text = "오류: " + ex.Message;
-                    Balloon("NetSwitch 시작 실패", ex.Message, ToolTipIcon.Error);
+                    _miRestore.Enabled = _switcher.Discovered;
+                    Balloon("NetSwitch 시작 실패", ex.Message + "\n15초마다 다시 시도합니다.", ToolTipIcon.Error);
+                    _retryTimer.Start();
                 });
                 return;
             }
 
             Post(() =>
             {
+                _startupRunning = false;
                 _ready = true;
+                _retryTimer.Stop();
                 _animTimer.Stop();
                 _miSwitch.Enabled = true;
+                _miRestore.Enabled = true;
+                _miAutostart.Enabled = true;
                 if (!string.IsNullOrEmpty(note)) Balloon("NetSwitch", note, ToolTipIcon.Info);
                 _watchdogTimer.Start();
+                RunWatchdog();
             });
-            RunWatchdog();
         }
 
         // ------------------------------------------------------------------ switching
 
         private void Toggle()
         {
-            if (!_ready || _switcher.IsSwitching) return;
-            var target = _switcher.OppositeOf(_switcher.CurrentMode);
-            Log.Info("사용자 요청: " + NetworkSwitcher.Describe(target) + " 로 전환");
-            _miSwitch.Enabled = false;
+            if (!_ready)
+            {
+                Balloon("NetSwitch", _startupRunning ? "아직 준비 중입니다. 잠시 후 다시 시도하세요." : "어댑터를 아직 찾지 못했습니다. 다시 시도합니다.", ToolTipIcon.Warning);
+                StartStartup();
+                return;
+            }
+            if (_busy) { Balloon("NetSwitch", "이미 전환 중입니다.", ToolTipIcon.Info); return; }
+            if (!_switcher.TryBeginSwitch()) { Balloon("NetSwitch", "이미 전환 중입니다.", ToolTipIcon.Info); return; }
+
+            var target = _switcher.NextTarget(_lastObs);
+            Log.Info("사용자 요청: " + NetworkSwitcher.Describe(target) + "으로 전환");
+            SetBusy(true);
             _progressText = "전환 시작…";
             _animTimer.Start();
             UpdateTooltip();
-            Balloon("전환 중", NetworkSwitcher.Describe(target) + " 으로 전환합니다…", ToolTipIcon.Info);
+            Balloon("전환 중", NetworkSwitcher.Describe(target) + "으로 전환합니다…", ToolTipIcon.Info);
 
             Task.Run(() =>
             {
@@ -185,27 +223,44 @@ namespace NetSwitch
                 catch (SwitchException ex) { error = ex.Message; }
                 catch (Exception ex) { Log.Error("전환 중 예기치 않은 오류", ex); error = "예기치 않은 오류: " + ex.Message; }
 
+                NetObservation o = null;
+                try { o = _switcher.Observe(); } catch (Exception ex) { Log.Warn("전환 후 상태 조회 실패: " + ex.Message); }
+
                 Post(() =>
                 {
                     _animTimer.Stop();
                     _progressText = "";
-                    _miSwitch.Enabled = true;
+                    SetBusy(false);
+                    if (o != null) { _lastObs = o; RefreshStatus(o); }
                     if (error != null)
                         Balloon("전환 실패", error, ToolTipIcon.Error);
                     else if (warn != null)
                         Balloon(NetworkSwitcher.Describe(_switcher.CurrentMode) + " (확인 필요)", warn, ToolTipIcon.Warning);
                     else
-                        Balloon("전환 완료", NetworkSwitcher.Describe(_switcher.CurrentMode) + " 을(를) 사용할 수 있습니다.", ToolTipIcon.Info);
+                        Balloon("전환 완료", NetworkSwitcher.Describe(_switcher.CurrentMode) + "을 사용할 수 있습니다.", ToolTipIcon.Info);
                 });
-                RunWatchdog();
             });
+        }
+
+        private void SetBusy(bool busy)
+        {
+            _busy = busy;
+            _miSwitch.Enabled = !busy;
+            _miRestore.Enabled = !busy;
+            _miExit.Enabled = !busy;
         }
 
         // ------------------------------------------------------------------ watchdog / status
 
+        private void OnNetworkChanged(object sender, EventArgs e)
+        {
+            // Raised on a thread-pool thread, possibly many times per change; the busy flag coalesces them.
+            Post(() => { if (_ready && !_busy) RunWatchdog(); });
+        }
+
         private void RunWatchdog()
         {
-            if (!_ready || _switcher.IsSwitching) return;
+            if (!_ready || _busy || _switcher.IsSwitching) return;
             if (Interlocked.CompareExchange(ref _watchdogBusy, 1, 0) != 0) return;
             Task.Run(() =>
             {
@@ -217,7 +272,7 @@ namespace NetSwitch
                     Post(() =>
                     {
                         _lastObs = o;
-                        RefreshStatus(o);
+                        if (!_busy) RefreshStatus(o);
                         if (msg != null && (DateTime.UtcNow - _lastWatchdogBalloon).TotalMinutes >= 2)
                         {
                             _lastWatchdogBalloon = DateTime.UtcNow;
@@ -239,7 +294,7 @@ namespace NetSwitch
             string status;
             if (mode == NetMode.Lan)
             {
-                if (o.Ethernet == null) { kind = TrayIconKind.LanWarn; status = "업무망(유선): 어댑터가 보이지 않음"; }
+                if (!o.EthernetPresent) { kind = TrayIconKind.LanWarn; status = "업무망(유선): 랜 어댑터가 보이지 않음"; }
                 else if (!o.EthernetLink) { kind = TrayIconKind.LanWarn; status = "업무망(유선): 랜선이 연결되지 않음"; }
                 else if (!o.EthernetUsable) { kind = TrayIconKind.LanWarn; status = "업무망(유선): IP 주소 대기 중"; }
                 else { kind = TrayIconKind.Lan; status = "업무망(유선 랜) 사용 중 · " + o.EthernetIp.Address; }
@@ -247,19 +302,20 @@ namespace NetSwitch
             }
             else if (mode == NetMode.Wifi)
             {
-                if (!o.WifiConnected) { kind = TrayIconKind.WifiWarn; status = "인터넷(와이파이): 연결되지 않음"; }
+                if (!o.WifiConnected) { kind = TrayIconKind.WifiWarn; status = o.WifiConnecting ? "인터넷(와이파이): 연결 중" : "인터넷(와이파이): 연결되지 않음"; }
                 else if (!o.WifiUsable) { kind = TrayIconKind.WifiWarn; status = "인터넷(와이파이): IP 주소 대기 중"; }
-                else { kind = TrayIconKind.Wifi; status = "인터넷(와이파이) 사용 중 · " + (string.IsNullOrEmpty(o.Wifi.Ssid) ? o.Wifi.ProfileName : o.Wifi.Ssid); }
+                else { kind = TrayIconKind.Wifi; status = "인터넷(와이파이) 사용 중 · " + o.Wifi.DisplayName; }
                 _miSwitch.Text = "업무망(유선 랜)으로 전환";
             }
             else
             {
-                kind = TrayIconKind.Error; status = "모드 알 수 없음";
-                _miSwitch.Text = "업무망(유선 랜)으로 전환";
+                kind = TrayIconKind.Neutral;
+                status = "복구됨: 와이파이·유선 모두 Windows가 관리";
+                _miSwitch.Text = o.WifiConnected ? "업무망(유선 랜)만 사용" : "인터넷(와이파이)만 사용";
             }
             _tray.Icon = _icons.Get(kind);
             _miStatus.Text = status;
-            _tray.Text = Trunc("NetSwitch · " + status + "\n더블클릭: 반대쪽으로 전환");
+            _tray.Text = Trunc("NetSwitch · " + status + "\n더블클릭: 전환");
         }
 
         private void UpdateTooltip()
@@ -275,17 +331,21 @@ namespace NetSwitch
 
         private void RefreshAutostartCheck()
         {
+            _miAutostart.Enabled = false;
             Task.Run(() =>
             {
                 bool on;
                 try { on = Autostart.IsRegistered(); } catch { on = false; }
-                Post(() => _miAutostart.Checked = on);
+                Post(() => { _miAutostart.Checked = on; _miAutostart.Enabled = _ready; });
             });
         }
 
         private void ToggleAutostart()
         {
             bool turnOn = !_miAutostart.Checked;
+            _miAutostart.Enabled = false;
+            _cfg.Autostart = turnOn;
+            _cfg.Save();
             Task.Run(() =>
             {
                 string err = null;
@@ -294,7 +354,7 @@ namespace NetSwitch
                 Post(() =>
                 {
                     if (err != null) Balloon("자동 실행 설정 실패", err, ToolTipIcon.Error);
-                    else Balloon("NetSwitch", turnOn ? "Windows 시작 시 자동으로 실행됩니다." : "자동 실행을 해제했습니다. (관리자 권한 없이 실행하면 UAC 창이 뜹니다)", ToolTipIcon.Info);
+                    else Balloon("NetSwitch", turnOn ? "Windows 시작 시 자동으로 실행됩니다." : "자동 실행을 해제했습니다. 직접 실행할 때는 UAC 창이 뜹니다.", ToolTipIcon.Info);
                     RefreshAutostartCheck();
                 });
             });
@@ -302,24 +362,29 @@ namespace NetSwitch
 
         private void RestoreDefaults()
         {
-            if (_switcher.IsSwitching) return;
-            var r = MessageBox.Show(_sync,
-                "와이파이와 유선 랜을 모두 켜고 윈도우 기본 상태로 되돌립니다.\n두 망이 동시에 연결될 수 있습니다.\n\n계속할까요?",
+            if (!_ready || _busy) return;
+            var r = Msg("와이파이와 유선 랜을 모두 켜고 Windows 기본 상태로 되돌립니다.\n두 망이 동시에 연결될 수 있습니다.\n\n계속할까요?",
                 "원래대로 복구", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             if (r != DialogResult.Yes) return;
-            _miSwitch.Enabled = false;
+            if (_busy) return;   // a switch may have started while the dialog was open
+            SetBusy(true);
+            _animTimer.Start();
             Task.Run(() =>
             {
                 string err = null;
                 try { _switcher.RestoreDefaults(_cts.Token); }
-                catch (Exception ex) { err = ex.Message; }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex) { err = ex.Message; Log.Error("복구 실패", ex); }
+                NetObservation o = null;
+                try { o = _switcher.Observe(); } catch { }
                 Post(() =>
                 {
-                    _miSwitch.Enabled = true;
+                    _animTimer.Stop();
+                    SetBusy(false);
+                    if (o != null) { _lastObs = o; RefreshStatus(o); }
                     if (err != null) Balloon("복구 실패", err, ToolTipIcon.Error);
                     else Balloon("복구 완료", "와이파이와 유선 랜이 모두 켜졌습니다. 더블클릭하면 다시 한쪽만 사용합니다.", ToolTipIcon.Info);
                 });
-                RunWatchdog();
             });
         }
 
@@ -337,26 +402,41 @@ namespace NetSwitch
         {
             var ver = typeof(TrayApp).Assembly.GetName().Version;
             var o = _lastObs;
+            string eth = o == null ? "-" : !o.EthernetPresent ? "어댑터 없음" : (o.EthernetEnabled ? "켜짐" : "꺼짐") + ", " + (o.EthernetLink ? "링크 있음" : "링크 없음") + ", " + o.EthernetIp.ToKorean();
+            string wifi = o == null ? "-" : o.Wifi.ToKorean() + ", " + o.WifiIp.ToKorean();
             var text =
-                "NetSwitch " + ver + "\n" +
+                "NetSwitch " + ver.Major + "." + ver.Minor + "." + ver.Build + "\n" +
                 "인터넷(와이파이) ↔ 업무망(유선 랜) 전환기\n\n" +
-                "유선 랜: " + (_switcher.EthernetName ?? "-") + "\n" +
-                "와이파이: " + (_switcher.WifiName ?? "-") + "\n" +
+                "유선 랜 어댑터: " + (_switcher.EthernetName ?? "-") + "\n" +
+                "와이파이 어댑터: " + (_switcher.WifiName ?? "-") + "\n" +
                 "와이파이 끊는 방식: " + (_cfg.WifiMethod == WifiMethod.Adapter ? "장치 끄기" : "자동구성 끄기 + 연결 끊기") + "\n" +
                 "현재 모드: " + NetworkSwitcher.Describe(_switcher.CurrentMode) + "\n" +
-                (o != null ? "유선: " + (o.Ethernet == null ? "없음" : (o.EthernetEnabled ? "켜짐" : "꺼짐") + (o.EthernetLink ? ", 링크 있음" : ", 링크 없음") + ", " + o.EthernetIp) + "\n" : "") +
-                (o != null ? "와이파이: " + o.Wifi + ", " + o.WifiIp + "\n" : "") +
+                "유선 상태: " + eth + "\n" +
+                "와이파이 상태: " + wifi + "\n" +
                 "\n설정·로그 폴더: " + AppPaths.DataDir + "\n" +
                 "관리자 권한: " + (Elevation.IsElevated() ? "예" : "아니오");
-            MessageBox.Show(_sync, text, "NetSwitch 정보", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Msg(text, "NetSwitch 정보", MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1);
         }
 
         private void ExitApp()
         {
+            if (_busy)
+            {
+                Balloon("NetSwitch", "전환이 끝난 뒤 종료하세요.", ToolTipIcon.Warning);
+                return;
+            }
+            if (_ready && _switcher.CurrentMode == NetMode.Lan)
+            {
+                var r = Msg("업무망 모드인 채로 종료하면 와이파이가 꺼진 상태로 남아 Windows의 와이파이 목록이 비어 보입니다.\n" +
+                            "와이파이를 다시 쓰려면 NetSwitch를 다시 실행하거나 '원래대로 복구'를 쓰세요.\n\n그래도 종료할까요?",
+                            "NetSwitch 종료", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                if (r != DialogResult.Yes) return;
+            }
             Log.Info("사용자 종료");
             _cts.Cancel();
             _watchdogTimer.Stop();
             _animTimer.Stop();
+            _retryTimer.Stop();
             _tray.Visible = false;
             ExitThread();
         }
@@ -365,11 +445,12 @@ namespace NetSwitch
         {
             if (disposing)
             {
+                try { NetworkChange.NetworkAddressChanged -= OnNetworkChanged; } catch { }
                 try { _tray.Visible = false; _tray.Dispose(); } catch { }
                 try { _menu.Dispose(); } catch { }
                 try { _icons.Dispose(); } catch { }
                 try { _sync.Dispose(); } catch { }
-                try { _watchdogTimer.Dispose(); _animTimer.Dispose(); } catch { }
+                try { _watchdogTimer.Dispose(); _animTimer.Dispose(); _retryTimer.Dispose(); } catch { }
             }
             base.Dispose(disposing);
         }
@@ -390,6 +471,12 @@ namespace NetSwitch
         private void Balloon(string title, string text, ToolTipIcon icon)
         {
             try { _tray.ShowBalloonTip(5000, title, text, icon); } catch { }
+        }
+
+        /// <summary>Message box for a tray app: no owner window, shown centred and on top.</summary>
+        private static DialogResult Msg(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon, MessageBoxDefaultButton def)
+        {
+            return MessageBox.Show(text, caption, buttons, icon, def, MessageBoxOptions.DefaultDesktopOnly);
         }
 
         private static string Trunc(string s)

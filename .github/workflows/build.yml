@@ -17,7 +17,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build (Release, .NET Framework 4.8)
-        run: dotnet build NetSwitch/NetSwitch.csproj -c Release -nologo
+        shell: pwsh
+        run: |
+          $ver = ''
+          if ('${{ github.ref }}' -like 'refs/tags/v*') { $ver = '${{ github.ref_name }}'.TrimStart('v') }
+          if ($ver) { dotnet build NetSwitch/NetSwitch.csproj -c Release -nologo "-p:Version=$ver" }
+          else      { dotnet build NetSwitch/NetSwitch.csproj -c Release -nologo }
 
       - name: Collect
         shell: pwsh

@@ -32,7 +32,7 @@ namespace NetSwitch.Net
         public bool IsWifi => InterfaceType == 71 || PhysicalMediaType == 9;
 
         private static readonly Regex VirtualNameRx = new Regex(
-            @"(virtual|hyper-v|vmware|virtualbox|vbox|tap-|tap |tun|wintun|wan miniport|loopback|bluetooth|wi-fi direct|wifi direct|npcap|vethernet|docker|wsl|zerotier|tailscale|hamachi|openvpn|wireguard|fortissl|pangp|cisco anyconnect|juniper|teredo|isatap|6to4|kernel debug|microsoft wi-fi|xbox)",
+            @"(virtual|hyper-v|vmware|virtualbox|vbox|tap-|tap |tun|wintun|wan miniport|loopback|bluetooth|wi-fi direct|wifi direct|npcap|vethernet|docker|wsl|zerotier|tailscale|hamachi|openvpn|wireguard|fortissl|pangp|cisco anyconnect|juniper|teredo|isatap|6to4|kernel debug|microsoft wi-fi|xbox|rndis|remote ndis|internet sharing|mobile device ethernet|usb tether|iphone|android)",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public bool LooksVirtual
@@ -60,12 +60,21 @@ namespace NetSwitch.Net
 
         // ------------------------------------------------------------------
 
-        private static readonly ManagementScope Scope = new ManagementScope(@"\\.\root\StandardCimv2");
+        private static readonly ManagementScope Scope = CreateScope();
 
-        public static List<NetAdapterInfo> QueryAll()
+        private static ManagementScope CreateScope()
+        {
+            var scope = new ManagementScope(@"\\.\root\StandardCimv2");
+            try { scope.Connect(); } catch (Exception ex) { Log.Warn("WMI 연결 실패(나중에 재시도): " + ex.Message); }
+            return scope;
+        }
+
+        public static List<NetAdapterInfo> QueryAll() => Query("SELECT * FROM MSFT_NetAdapter");
+
+        private static List<NetAdapterInfo> Query(string wql)
         {
             var list = new List<NetAdapterInfo>();
-            using (var searcher = new ManagementObjectSearcher(Scope, new ObjectQuery("SELECT * FROM MSFT_NetAdapter")))
+            using (var searcher = new ManagementObjectSearcher(Scope, new ObjectQuery(wql)))
             using (var results = searcher.Get())
             {
                 foreach (ManagementObject mo in results)
@@ -82,6 +91,11 @@ namespace NetSwitch.Net
 
         public static NetAdapterInfo QueryByGuid(Guid guid)
         {
+            if (guid == Guid.Empty) return null;
+            // Targeted query first (cheap); WQL string comparison is case-insensitive.
+            var hits = Query("SELECT * FROM MSFT_NetAdapter WHERE InterfaceGuid = '" + guid.ToString("B") + "'");
+            foreach (var a in hits)
+                if (a.InterfaceGuid == guid) return a;
             foreach (var a in QueryAll())
                 if (a.InterfaceGuid == guid) return a;
             return null;

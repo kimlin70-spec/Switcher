@@ -14,6 +14,7 @@ namespace NetSwitch
         LanWarn,        // 업무망 모드인데 랜선 없음 / IP 없음
         SwitchingA,     // 전환 중 (프레임 1)
         SwitchingB,     // 전환 중 (프레임 2)
+        Neutral,        // 복구됨: 양쪽 모두 윈도우가 관리
         Error
     }
 
@@ -90,7 +91,7 @@ namespace NetSwitch
                             break;
                         case TrayIconKind.Lan:
                         case TrayIconKind.LanWarn:
-                            DrawPlug(g, pen, white, s);
+                            DrawPlug(g, pen, white, s, bg);
                             break;
                         case TrayIconKind.SwitchingA:
                             DrawArrows(g, pen, s, 0);
@@ -101,6 +102,11 @@ namespace NetSwitch
                         case TrayIconKind.Error:
                             g.DrawLine(pen, s * 0.3f, s * 0.3f, s * 0.7f, s * 0.7f);
                             g.DrawLine(pen, s * 0.7f, s * 0.3f, s * 0.3f, s * 0.7f);
+                            break;
+                        case TrayIconKind.Neutral:
+                            // two dots: both sides on
+                            g.FillEllipse(white, s * 0.22f, s * 0.38f, s * 0.24f, s * 0.24f);
+                            g.FillEllipse(white, s * 0.54f, s * 0.38f, s * 0.24f, s * 0.24f);
                             break;
                     }
                 }
@@ -135,7 +141,7 @@ namespace NetSwitch
             g.FillEllipse(dot, cx - d / 2f, cy - d / 2f - s * 0.02f, d, d);
         }
 
-        private static void DrawPlug(Graphics g, Pen pen, Brush fill, float s)
+        private static void DrawPlug(Graphics g, Pen pen, Brush fill, float s, Color bg)
         {
             // RJ45-ish: a body with a cable
             float w = s * 0.46f, h = s * 0.36f;
@@ -143,7 +149,7 @@ namespace NetSwitch
             g.FillRectangle(fill, x, y, w, h);
             // notch
             float nw = w * 0.5f, nh = h * 0.3f;
-            using (var bgPen = new SolidBrush(LanGreen)) g.FillRectangle(bgPen, x + (w - nw) / 2f, y, nw, nh);
+            using (var bgBrush = new SolidBrush(bg)) g.FillRectangle(bgBrush, x + (w - nw) / 2f, y, nw, nh);
             // cable
             g.DrawLine(pen, s / 2f, y + h, s / 2f, s * 0.84f);
         }

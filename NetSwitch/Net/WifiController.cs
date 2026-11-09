@@ -15,7 +15,18 @@ namespace NetSwitch.Net
         public bool InterfacePresent;       // the WLAN service knows the interface (false when adapter disabled)
         public bool IsConnected => State == WLAN_INTERFACE_STATE.Connected;
         public bool IsConnecting => State == WLAN_INTERFACE_STATE.Associating || State == WLAN_INTERFACE_STATE.Authenticating || State == WLAN_INTERFACE_STATE.Discovering;
+        public bool IsTransitioning => IsConnecting || State == WLAN_INTERFACE_STATE.Disconnecting;
+        public string DisplayName => !string.IsNullOrEmpty(Ssid) ? Ssid : ProfileName;
         public override string ToString() => (InterfacePresent ? State.ToString() : "absent") + (IsConnected ? " profile='" + ProfileName + "' ssid='" + Ssid + "'" : "");
+        public string ToKorean()
+        {
+            if (!InterfacePresent) return "장치 없음(꺼짐)";
+            if (IsConnected) return "연결됨" + (string.IsNullOrEmpty(DisplayName) ? "" : " · " + DisplayName);
+            if (IsConnecting) return "연결 중";
+            if (State == WLAN_INTERFACE_STATE.Disconnecting) return "끊는 중";
+            if (State == WLAN_INTERFACE_STATE.NotReady) return "준비 안 됨";
+            return "끊김";
+        }
     }
 
     /// <summary>
@@ -251,7 +262,19 @@ namespace NetSwitch.Net
         private static void Check(uint rc, string what)
         {
             if (rc != ERROR_SUCCESS)
-                throw new System.ComponentModel.Win32Exception((int)rc, what + " 실패 (코드 " + rc + ")");
+                throw new System.ComponentModel.Win32Exception((int)rc, Korean(what) + " 실패 (코드 " + rc + ")");
+        }
+
+        private static string Korean(string api)
+        {
+            switch (api)
+            {
+                case "WlanOpenHandle": return "와이파이 서비스 연결";
+                case "WlanEnumInterfaces": return "와이파이 장치 조회";
+                case "WlanSetInterface(autoconf)": return "와이파이 자동구성 설정";
+                case "WlanDisconnect": return "와이파이 연결 끊기";
+                default: return api;
+            }
         }
     }
 }

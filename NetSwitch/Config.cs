@@ -48,6 +48,8 @@ namespace NetSwitch
         public int WifiConnectWaitSeconds { get => GetInt("wifi_connect_wait_sec", 20, 3, 300); set => Set("wifi_connect_wait_sec", value.ToString(CultureInfo.InvariantCulture)); }
         public bool Watchdog { get => GetBool("watchdog", true); set => Set("watchdog", value ? "true" : "false"); }
         public bool FlushDns { get => GetBool("flush_dns", true); set => Set("flush_dns", value ? "true" : "false"); }
+        /// <summary>User's choice for the logon task. Default true. Turned off from the tray menu or --uninstall-task.</summary>
+        public bool Autostart { get => GetBool("autostart", true); set => Set("autostart", value ? "true" : "false"); }
 
         // --- maintained by the app ---
         public NetMode LastMode
@@ -62,6 +64,8 @@ namespace NetSwitch
             set => Set("mode", value == NetMode.Wifi ? "wifi" : value == NetMode.Lan ? "lan" : "");
         }
         public string LastWifiProfile { get => Get("last_wifi_profile"); set => Set("last_wifi_profile", value); }
+        /// <summary>True after '원래대로 복구': both adapters are Windows-managed until the user switches again.</summary>
+        public bool Restored { get => GetBool("restored", false); set => Set("restored", value ? "true" : "false"); }
         public string EthernetGuid { get => Get("ethernet_guid"); set => Set("ethernet_guid", value); }
         public string WifiGuid { get => Get("wifi_guid"); set => Set("wifi_guid", value); }
 
@@ -124,8 +128,11 @@ namespace NetSwitch
                 sb.AppendLine("# wifi_adapter      : 와이파이 어댑터 지정(연결 이름 또는 GUID, 보통 비워 둠)");
                 sb.AppendLine("# link_wait_sec     : 유선 랜을 켠 뒤 랜선 연결(링크)을 기다리는 최대 시간(초)");
                 sb.AppendLine("# ip_wait_sec       : IP 주소 할당을 기다리는 최대 시간(초)");
+                sb.AppendLine("# wifi_connect_wait_sec : 와이파이 연결을 기다리는 최대 시간(초)");
                 sb.AppendLine("# watchdog          : true면 반대쪽 망이 몰래 다시 연결될 때 자동으로 끊음");
-                sb.AppendLine("# 아래 값들은 프로그램이 자동으로 관리합니다: mode, last_wifi_profile, ethernet_guid, wifi_guid");
+                sb.AppendLine("# flush_dns         : true면 전환 후 DNS 캐시를 비움");
+                sb.AppendLine("# autostart         : true면 Windows 시작 시 자동 실행(작업 스케줄러) 유지");
+                sb.AppendLine("# 아래 값들은 프로그램이 자동으로 관리합니다: mode, restored, last_wifi_profile, ethernet_guid, wifi_guid");
                 sb.AppendLine();
                 var keys = new List<string>(_values.Keys);
                 keys.Sort(StringComparer.OrdinalIgnoreCase);
