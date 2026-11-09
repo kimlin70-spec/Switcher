@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <!-- WinForms/Drawing are referenced explicitly (instead of UseWindowsForms) so the
+         project also compiles on Linux SDKs that lack the WindowsDesktop targets. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <CodePage>65001</CodePage>
+    <AssemblyName>NetSwitch</AssemblyName>
+    <RootNamespace>NetSwitch</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Version>0.1.0</Version>
+    <AssemblyTitle>NetSwitch</AssemblyTitle>
+    <Product>NetSwitch</Product>
+    <Description>인터넷(와이파이) / 업무망(유선 랜) 전환기</Description>
+    <Company></Company>
+    <Copyright></Copyright>
+    <NeutralLanguage>ko-KR</NeutralLanguage>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Management" />
+    <Reference Include="System.Xml" />
+    <Reference Include="System.Xml.Linq" />
+  </ItemGroup>
+
+</Project>
