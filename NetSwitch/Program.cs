@@ -83,28 +83,32 @@ namespace NetSwitch
                 }
             }
 
+            // Make sure the autostart task points at this exe. Done before the single-instance check so that
+            // replacing the exe while an older copy is still running still fixes the registration.
+            string note = null;
+            try
+            {
+                if (!Autostart.IsRegisteredForThisExe())
+                {
+                    Autostart.Register();
+                    note = "Windows 시작 시 자동으로 실행되도록 등록했습니다. 앞으로 UAC 창은 뜨지 않습니다.";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("자동 실행 등록 실패", ex);
+                note = "자동 실행 등록에 실패했습니다: " + ex.Message;
+            }
+
             // Single elevated instance.
             using (var mutex = new Mutex(true, MutexName, out bool createdNew))
             {
                 if (!createdNew)
                 {
                     Log.Info("이미 실행 중인 인스턴스가 있어 종료합니다.");
+                    MessageBox.Show("NetSwitch가 이미 트레이에서 실행 중입니다.\n새 버전으로 바꾸려면 트레이 아이콘 우클릭 → 종료 후 다시 실행하세요.",
+                        "NetSwitch", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return 0;
-                }
-
-                string note = null;
-                try
-                {
-                    if (!Autostart.IsRegisteredForThisExe())
-                    {
-                        Autostart.Register();
-                        note = "Windows 시작 시 자동으로 실행되도록 등록했습니다. 앞으로 UAC 창은 뜨지 않습니다.";
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.Error("자동 실행 등록 실패", ex);
-                    note = "자동 실행 등록에 실패했습니다: " + ex.Message;
                 }
 
                 using (var app = new TrayApp(cfg, note))
