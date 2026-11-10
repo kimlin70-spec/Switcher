@@ -404,14 +404,15 @@ namespace NetSwitch
         {
             var ver = typeof(TrayApp).Assembly.GetName().Version;
             var o = _lastObs;
-            string eth = o == null ? "-" : !o.EthernetPresent ? "어댑터 없음" : (o.EthernetEnabled ? "켜짐" : "꺼짐") + ", " + (o.EthernetLink ? "링크 있음" : "링크 없음") + ", " + o.EthernetIp.ToKorean();
+            string eth = o == null ? "-" : !o.EthernetPresent ? "어댑터 없음" : (o.EthernetEnabled ? "장치 켜짐" : "장치 꺼짐") + ", " + (o.EthernetLink ? "링크 있음" : "링크 없음") + ", " + (o.EthernetEnabled && !o.EthernetIpBound ? "IP 뗌(사용 안 함)" : o.EthernetIp.ToKorean());
             string wifi = o == null ? "-" : o.Wifi.ToKorean() + ", " + o.WifiIp.ToKorean();
             var text =
                 "NetSwitch " + ver.Major + "." + ver.Minor + "." + ver.Build + "\n" +
                 "인터넷(와이파이) ↔ 업무망(유선 랜) 전환기\n\n" +
                 "유선 랜 어댑터: " + (_switcher.EthernetName ?? "-") + "\n" +
                 "와이파이 어댑터: " + (_switcher.WifiName ?? "-") + "\n" +
-                "와이파이 끊는 방식: " + (_cfg.WifiMethod == WifiMethod.Adapter ? "장치 끄기" : "자동구성 끄기 + 연결 끊기") + "\n" +
+                "와이파이 끊는 방식: " + (_cfg.WifiMethod == WifiMethod.Adapter ? "장치 끄기" : "연결 끊기 + 자동구성 끄기") + "\n" +
+                "유선 랜 끄는 방식: " + (_cfg.EthernetMethod == EthernetMethod.Adapter ? "장치 끄기" : "장치는 켜 둔 채 IP만 떼기") + "\n" +
                 "현재 모드: " + NetworkSwitcher.Describe(_switcher.CurrentMode) + "\n" +
                 "유선 상태: " + eth + "\n" +
                 "와이파이 상태: " + wifi + "\n" +

@@ -9,10 +9,11 @@ namespace NetSwitch.Net
     internal sealed class IpStatus
     {
         public bool InterfaceUp;
+        public bool IpBound;           // the interface exists in the IP stack (IPv4 or IPv6 bound). False when unbound, disabled or absent.
         public IPAddress Address;      // first usable (non-APIPA) IPv4, or null
         public IPAddress Gateway;      // first IPv4 gateway, or null
         public bool HasUsableIp => Address != null;
-        public override string ToString() => (InterfaceUp ? "up" : "down") + " ip=" + (Address?.ToString() ?? "-") + " gw=" + (Gateway?.ToString() ?? "-");
+        public override string ToString() => (InterfaceUp ? "up" : "down") + (IpBound ? "" : " unbound") + " ip=" + (Address?.ToString() ?? "-") + " gw=" + (Gateway?.ToString() ?? "-");
         public string ToKorean() => Address == null ? "IP 없음" : "IP " + Address + (Gateway != null ? ", 게이트웨이 " + Gateway : ", 게이트웨이 없음");
     }
 
@@ -35,6 +36,8 @@ namespace NetSwitch.Net
             {
                 if (!string.Equals(ni.Id, target, StringComparison.OrdinalIgnoreCase)) continue;
                 st.InterfaceUp = ni.OperationalStatus == OperationalStatus.Up;
+                try { st.IpBound = ni.Supports(NetworkInterfaceComponent.IPv4) || ni.Supports(NetworkInterfaceComponent.IPv6); }
+                catch { st.IpBound = true; }
                 IPInterfaceProperties props;
                 try { props = ni.GetIPProperties(); } catch { break; }
                 foreach (var ua in props.UnicastAddresses)

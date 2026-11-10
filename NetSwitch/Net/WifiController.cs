@@ -205,7 +205,11 @@ namespace NetSwitch.Net
             }
         }
 
-        public void Disconnect()
+        /// <summary>
+        /// Asks the WLAN service to drop the current connection. Returns the Win32 code:
+        /// 0 = ok, 5023 = already disconnected, 50 = not supported (auto-config is off, the service does not manage the interface).
+        /// </summary>
+        public uint Disconnect()
         {
             IntPtr h = IntPtr.Zero;
             try
@@ -214,8 +218,7 @@ namespace NetSwitch.Net
                 var guid = _guid;
                 uint rc = WlanDisconnect(h, ref guid, IntPtr.Zero);
                 Log.Info("WlanDisconnect -> " + rc);
-                // ERROR_INVALID_STATE: already disconnected / not managed. Not fatal.
-                if (rc != ERROR_SUCCESS && rc != ERROR_INVALID_STATE) Check(rc, "WlanDisconnect");
+                return rc;
             }
             finally { if (h != IntPtr.Zero) WlanCloseHandle(h, IntPtr.Zero); }
         }

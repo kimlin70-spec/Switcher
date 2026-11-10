@@ -39,8 +39,13 @@
 
 | 방향 | 순서 |
 |---|---|
-| 인터넷 → 업무망 | 유선 어댑터 존재 확인 → 와이파이 자동구성 끄기 + 연결 끊기 → 끊김 확인 → 유선 랜 어댑터 켜기 → 랜선 링크 확인 → IP 할당 확인 → DNS 캐시 비우기 |
-| 업무망 → 인터넷 | 유선 랜 어댑터 끄기 → 꺼짐 확인 → 와이파이 자동구성 켜기 → Windows 자동 연결 4초 대기 → 안 되면 평소 쓰던 프로필로 연결 → IP 확인 → DNS 캐시 비우기 |
+| 인터넷 → 업무망 | 유선 어댑터 존재 확인 → 와이파이 연결 끊기 + 자동구성 끄기 → 끊김 확인 → 유선 랜에 IP 다시 붙이기 → 랜선 링크 확인 → IP 할당 확인 → DNS 캐시 비우기 |
+| 업무망 → 인터넷 | 유선 랜에서 IP 떼기 → 떼어짐 확인 → 와이파이 자동구성 켜기 → 평소 쓰던 프로필로 연결 → IP 확인 → DNS 캐시 비우기 |
+
+**유선 랜을 "끄는" 방식.** 기본값은 장치를 끄지 않고 **IPv4/IPv6 바인딩만 떼는 것**입니다(어댑터 속성에서 "인터넷 프로토콜 버전 4/6" 체크를 푸는 것과 같음).
+장치는 켜져 있고 랜선 링크도 살아 있지만 IP 주소·경로·DNS가 없으므로 네트워크 연결로 취급되지 않습니다.
+USB 랜 어댑터는 장치를 통째로 끄면 드라이버가 내려가 Windows가 포트를 절전시키고, 그러다 장치가 아예 사라지는 일이 실제로 있었기 때문입니다.
+그래서 인터넷 모드일 때 "네트워크 연결" 창에 이더넷이 켜진 것처럼 보이는 것은 정상입니다. 장치를 통째로 끄는 예전 방식은 `ethernet_method=adapter`로 쓸 수 있습니다.
 
 고정 대기시간이 아니라 실제 상태를 확인하고 다음 단계로 넘어갑니다.
 보통 5~10초, 업무망에 802.1X 인증이 있으면 몇 초 더 걸립니다.
@@ -80,7 +85,8 @@ Microsoft 문서에 명시돼 있지 않아, 프로그램이 시작되면 저장
 | 키 | 기본값 | 설명 |
 |---|---|---|
 | `wifi_profile` | (비움) | 인터넷으로 돌아올 때 연결할 와이파이 프로필 이름. 비우면 마지막에 쓰던 것 |
-| `wifi_method` | `autoconfig` | `autoconfig`: 자동구성 끄기+연결 끊기(빠름). `adapter`: 와이파이 장치를 통째로 끔(느리지만 가장 확실) |
+| `wifi_method` | `autoconfig` | `autoconfig`: 연결 끊기+자동구성 끄기(빠름). `adapter`: 와이파이 장치를 통째로 끔(느리지만 가장 확실) |
+| `ethernet_method` | `binding` | `binding`: 장치는 켜 둔 채 IP만 뗌(USB 랜에 안전, 빠름). `adapter`: 유선 랜 장치를 통째로 끔 |
 | `ethernet_adapter` / `wifi_adapter` | (비움) | 어댑터가 여러 개일 때 연결 이름(예: `이더넷`) 또는 GUID로 지정 |
 | `link_wait_sec` | 12 | 유선 랜을 켠 뒤 랜선 링크를 기다리는 최대 시간 |
 | `ip_wait_sec` | 25 | IP 할당을 기다리는 최대 시간 |
@@ -94,8 +100,10 @@ Microsoft 문서에 명시돼 있지 않아, 프로그램이 시작되면 저장
 - C# / WinForms / **.NET Framework 4.8** (Windows 10 1903+, Windows 11에 내장 → 런타임 설치 불필요, exe 하나)
 - 와이파이: Native Wifi API(`wlanapi.dll`) 직접 호출 — 자동구성(`autoconf_enabled`) 끄기/켜기, 연결 끊기, 프로필로 연결, 상태 조회.
   `netsh` 출력 파싱을 하지 않으므로 한국어 Windows에서도 안전합니다.
-  자동구성을 끄는 것만으로는 현재 연결이 끊기지 않으므로 명시적으로 끊고 확인하며, 설정이 거부되거나 연결이 유지되면 어댑터를 꺼서 겹침을 막습니다.
-- 유선 랜: WMI `root\StandardCimv2\MSFT_NetAdapter`의 `Enable()/Disable()` (PowerShell `Disable-NetAdapter`와 같은 경로). 비동기이므로 상태를 폴링해 확인합니다.
+  순서가 중요합니다. 자동구성을 먼저 끄면 `WlanDisconnect`가 50(지원 안 됨)을 돌려주고 연결이 남는 경우가 있어, **먼저 끊고 곧바로 자동구성을 끕니다.** 그래도 남으면 한 번 더 시도한 뒤 어댑터를 꺼서 겹침을 막습니다.
+- 유선 랜: WMI `root\StandardCimv2\MSFT_NetAdapterBindingSettingData`의 `Enable()/Disable()`로 `ms_tcpip`, `ms_tcpip6` 바인딩을 제어합니다(PowerShell `Disable-NetAdapterBinding`과 같은 경로, 실패 시 PowerShell로 재시도).
+  바인딩 제어가 확인되지 않으면 `MSFT_NetAdapter.Disable()`(장치 끄기)로 대체해 겹침을 막습니다.
+- 유선 어댑터가 Windows에 보이지 않으면 와이파이를 건드리기 전에 하드웨어 다시 검색(`pnputil /scan-devices`)을 한 번 시도합니다.
 - IP 확인: `System.Net.NetworkInformation` (169.254.x.x APIPA는 미할당으로 취급)
 - 권한: exe 매니페스트는 `asInvoker`. 관리자 권한은 작업 스케줄러 작업(`RunLevel=HighestAvailable`, 로그온 트리거, 작업 스케줄러 COM API로 등록)으로 얻습니다.
   exe를 직접 더블클릭해도, 등록된 작업이 있으면 그 작업으로 관리자 인스턴스를 띄우므로 UAC가 뜨지 않습니다.

@@ -29,11 +29,13 @@ namespace NetSwitch.Net
         public bool EthernetPresent => Ethernet != null;
         public bool EthernetEnabled => Ethernet != null && Ethernet.IsEnabled;
         public bool EthernetLink => Ethernet != null && Ethernet.HasLink;
+        /// <summary>The wired interface is attached to the IP stack (IPv4/IPv6 bound). False when we unbound it.</summary>
+        public bool EthernetIpBound => EthernetIp != null && EthernetIp.IpBound;
         public bool EthernetUsable => EthernetEnabled && EthernetLink && EthernetIp != null && EthernetIp.HasUsableIp;
         public bool WifiConnected => Wifi != null && Wifi.IsConnected;
         public bool WifiConnecting => Wifi != null && Wifi.IsConnecting;
         public bool WifiUsable => WifiConnected && WifiIp != null && WifiIp.HasUsableIp;
-        public bool Overlap => EthernetEnabled && EthernetLink && WifiConnected;
+        public bool Overlap => EthernetEnabled && EthernetLink && EthernetIpBound && WifiConnected;
     }
 
     /// <summary>
@@ -213,7 +215,7 @@ namespace NetSwitch.Net
         /// <summary>Decides which mode the machine is "in" right now, used only when nothing was saved.</summary>
         public static NetMode InferMode(NetObservation o)
         {
-            bool lan = o.EthernetEnabled && o.EthernetLink;
+            bool lan = o.EthernetEnabled && o.EthernetLink && o.EthernetIpBound;
             bool wifi = o.WifiConnected;
             if (lan && !wifi) return NetMode.Lan;
             if (wifi && !lan) return NetMode.Wifi;
@@ -235,7 +237,7 @@ namespace NetSwitch.Net
             lock (_gate)
             {
                 var o = Observe();
-                Log.Info("시작 상태: 유선=" + (o.Ethernet == null ? "없음" : (o.EthernetEnabled ? "켜짐" : "꺼짐") + (o.EthernetLink ? "/링크" : "/링크없음")) + " 와이파이=" + o.Wifi + " autoconf=" + (Wifi.QueryAutoconfigEnabled()?.ToString() ?? "?"));
+                Log.Info("시작 상태: 유선방식=" + _cfg.EthernetMethod + " 유선=" + (o.Ethernet == null ? "없음" : (o.EthernetEnabled ? "켜짐" : "꺼짐") + (o.EthernetLink ? "/링크" : "/링크없음") + (o.EthernetIpBound ? "/IP붙음" : "/IP뗌")) + " 와이파이=" + o.Wifi + " autoconf=" + (Wifi.QueryAutoconfigEnabled()?.ToString() ?? "?"));
 
                 if (_cfg.Restored)
                 {
@@ -286,10 +288,10 @@ namespace NetSwitch.Net
                                 {
                                     AdapterControl.Disable(WifiGuid);
                                 }
-                                if (!o.EthernetEnabled)
+                                if (!WireActive(o))
                                 {
                                     Log.Info("시작: 업무망 모드인데 유선 랜이 꺼져 있음 -> 켬");
-                                    AdapterControl.Enable(EthernetGuid);
+                                    WireOn(ct);
                                 }
                             }
                             catch (OperationCanceledException) { throw; }
@@ -305,11 +307,17 @@ namespace NetSwitch.Net
                     }
                     else
                     {
-                        if (o.EthernetEnabled)
+                        if (WireActive(o))
                         {
                             Log.Info("시작: 인터넷 모드인데 유선 랜이 켜져 있음 -> 끔");
-                            AdapterControl.Disable(EthernetGuid);
-                            AdapterControl.WaitFor(EthernetGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
+                            WireOff(ct);
+                        }
+                        else if (o.Ethernet != null && o.Ethernet.IsDisabled && _cfg.EthernetMethod == EthernetMethod.Binding)
+                        {
+                            // Left device-disabled by an earlier version. A disabled USB NIC can drop off the bus,
+                            // so convert it to "device running, IP unbound".
+                            Log.Info("시작: 유선 랜 장치가 꺼져 있음 -> 장치는 켜고 IP만 뗀 상태로 바꿈");
+                            WireOff(ct);
                         }
                         if (o.WifiConnected)
                         {
@@ -409,13 +417,22 @@ namespace NetSwitch.Net
         {
             // 0) Is there a wire to switch to at all? Check BEFORE touching Wi-Fi.
             var eth = EthernetGuid == Guid.Empty ? null : NetAdapterInfo.QueryByGuid(EthernetGuid);
+            if (eth == null) eth = TryAdoptEthernet(NetAdapterInfo.QueryAll());
             if (eth == null)
             {
-                var all = NetAdapterInfo.QueryAll();
-                eth = TryAdoptEthernet(all);
+                // The device is not known to Windows right now. Ask for a hardware re-scan and look again.
+                Report("유선 랜 어댑터를 찾는 중…");
+                BindingControl.RescanDevices();
+                var until = DateTime.UtcNow.AddSeconds(6);
+                while (eth == null && DateTime.UtcNow < until)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    Thread.Sleep(500);
+                    eth = TryAdoptEthernet(NetAdapterInfo.QueryAll());
+                }
             }
             if (eth == null)
-                throw new SwitchException("유선 랜 어댑터가 보이지 않습니다. 독이나 USB 랜 어댑터가 연결되어 있는지 확인하세요. (와이파이는 그대로입니다)");
+                throw new SwitchException("유선 랜 어댑터가 Windows에 보이지 않습니다. USB 랜 어댑터(또는 독)를 뽑았다가 다시 꽂은 뒤 시도하세요. (와이파이는 그대로입니다)");
 
             // 1) Wi-Fi off first. Never touch the wire while Wi-Fi is still up.
             Report("와이파이 끊는 중…");
@@ -439,15 +456,8 @@ namespace NetSwitch.Net
 
                 // 2) Wire on.
                 Report("유선 랜 켜는 중…");
-                if (!eth.IsEnabled)
-                {
-                    wireTouched = true;
-                    AdapterControl.Enable(EthernetGuid);
-                    eth = AdapterControl.WaitFor(EthernetGuid, a => a.IsEnabled, TimeSpan.FromSeconds(15), ct);
-                    if (eth == null || !eth.IsEnabled)
-                        throw new SwitchException("유선 랜 어댑터를 켜지 못했습니다. " + RollbackToWifi(ct, wireTouched: true));
-                }
                 wireTouched = true;
+                WireOn(ct);
 
                 // 3) Cable actually plugged in?
                 Report("랜선 연결 확인 중…");
@@ -489,13 +499,12 @@ namespace NetSwitch.Net
             // 1) Wire off first.
             Report("유선 랜 끄는 중…");
             var eth = EthernetGuid == Guid.Empty ? null : NetAdapterInfo.QueryByGuid(EthernetGuid);
-            if (eth != null && !eth.IsDisabled)
+            if (eth != null)
             {
-                AdapterControl.Disable(EthernetGuid);
-                if (!ConfirmWireOff(ct))
+                if (!WireOff(ct))
                     throw new SwitchException("유선 랜을 끄지 못해 전환을 중단했습니다. (와이파이는 건드리지 않았습니다)");
             }
-            else if (eth == null)
+            else
             {
                 Log.Warn("유선 랜 어댑터가 없는 상태에서 인터넷 모드로 전환. 어댑터가 다시 나타나면 감시 기능이 즉시 끕니다.");
             }
@@ -530,11 +539,8 @@ namespace NetSwitch.Net
             if (wireTouched && EthernetGuid != Guid.Empty)
             {
                 bool off = false;
-                try
-                {
-                    AdapterControl.Disable(EthernetGuid);
-                    off = ConfirmWireOff(ct);
-                }
+                try { off = WireOff(ct); }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { Log.Warn("롤백 중 유선 끄기 실패: " + ex.Message); }
                 if (!off)
                     return "유선 랜을 다시 끄지 못해 와이파이를 켜지 않았습니다(두 망이 겹치지 않게 하기 위함). 트레이 메뉴의 '원래대로 복구'를 실행하세요.";
@@ -547,6 +553,90 @@ namespace NetSwitch.Net
             catch (SwitchWarning w) { Log.Warn("롤백 경고: " + w.Message); return "와이파이를 켰지만 자동으로 연결되지 않았습니다. 작업 표시줄에서 직접 연결하세요."; }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { Log.Error("와이파이 롤백 실패", ex); return "와이파이 복구에 실패했습니다(" + ex.Message + "). '원래대로 복구'를 실행하세요."; }
+        }
+
+        // ---------------------------------------------------------------------
+        // The wire. "Off" means it is not an IP network: either the device is disabled (adapter method)
+        // or it is running with IPv4/IPv6 unbound (binding method, default).
+        // ---------------------------------------------------------------------
+
+        private bool WireActive(NetObservation o)
+        {
+            if (!o.EthernetEnabled) return false;
+            return _cfg.EthernetMethod == EthernetMethod.Adapter || o.EthernetIpBound;
+        }
+
+        /// <summary>Takes the wire out of service and confirms it. Returns false if it could not be confirmed off.</summary>
+        private bool WireOff(CancellationToken ct)
+        {
+            if (EthernetGuid == Guid.Empty) return true;
+            var eth = NetAdapterInfo.QueryByGuid(EthernetGuid);
+            if (eth == null)
+            {
+                Log.Info("유선 랜 어댑터가 없음 -> 끌 것이 없음");
+                return true;
+            }
+
+            if (_cfg.EthernetMethod == EthernetMethod.Binding)
+            {
+                try
+                {
+                    if (eth.IsDisabled)
+                    {
+                        // Unbind first (may not work on a disabled device), start the device, unbind again.
+                        try { BindingControl.SetIpBound(EthernetGuid, eth.Name, false); }
+                        catch (Exception ex) { Log.Info("꺼진 장치의 바인딩 변경은 건너뜀: " + ex.Message); }
+                        AdapterControl.Enable(EthernetGuid);
+                        AdapterControl.WaitFor(EthernetGuid, a => a.IsEnabled, TimeSpan.FromSeconds(10), ct);
+                    }
+                    BindingControl.SetIpBound(EthernetGuid, eth.Name, false);
+                    if (ConfirmUnbound(ct)) return true;
+                    Log.Warn("유선 랜의 IP를 뗐지만 확인되지 않음 -> 장치 끄기로 대체");
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { Log.Warn("유선 랜 IP 떼기 실패 -> 장치 끄기로 대체: " + ex.Message); }
+            }
+
+            var now = NetAdapterInfo.QueryByGuid(EthernetGuid);
+            if (now != null && !now.IsDisabled) AdapterControl.Disable(EthernetGuid);
+            return ConfirmWireOff(ct);
+        }
+
+        /// <summary>Puts the wire in service: device enabled and IP stack attached. Does not wait for link or DHCP.</summary>
+        private void WireOn(CancellationToken ct)
+        {
+            var eth = NetAdapterInfo.QueryByGuid(EthernetGuid);
+            if (eth == null) throw new InvalidOperationException("유선 랜 어댑터가 보이지 않습니다");
+            if (!eth.IsEnabled)
+            {
+                AdapterControl.Enable(EthernetGuid);
+                eth = AdapterControl.WaitFor(EthernetGuid, a => a.IsEnabled, TimeSpan.FromSeconds(15), ct);
+                if (eth == null || !eth.IsEnabled) throw new InvalidOperationException("유선 랜 어댑터를 켜지 못했습니다");
+            }
+            if (IpProbe.Query(EthernetGuid).IpBound) return;
+
+            BindingControl.SetIpBound(EthernetGuid, eth.Name, true);
+            var deadline = DateTime.UtcNow.AddSeconds(8);
+            while (!IpProbe.Query(EthernetGuid).IpBound)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (DateTime.UtcNow >= deadline) throw new InvalidOperationException("유선 랜의 IP 설정을 다시 켜지 못했습니다");
+                Thread.Sleep(200);
+            }
+        }
+
+        /// <summary>True when the wired interface has left the IP stack (no IPv4/IPv6 binding, no address).</summary>
+        private bool ConfirmUnbound(CancellationToken ct)
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(6);
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                var ip = IpProbe.Query(EthernetGuid);
+                if (!ip.IpBound && ip.Address == null) return true;
+                if (DateTime.UtcNow >= deadline) { Log.Warn("유선 IP 상태(뗀 뒤): " + ip); return false; }
+                Thread.Sleep(200);
+            }
         }
 
         /// <summary>
@@ -582,20 +672,36 @@ namespace NetSwitch.Net
                 return;
             }
 
-            // autoconfig method: first stop Windows from auto-connecting (this alone does NOT drop
-            // the current association), then disconnect explicitly, then verify.
+            // autoconfig method. Order matters (seen in the field): once auto-config is off the WLAN service
+            // no longer manages the interface and WlanDisconnect returns ERROR_NOT_SUPPORTED (50) while the
+            // association may stay up. So: disconnect FIRST, then immediately forbid auto-reconnect, then verify.
             bool autoconfOff = false;
-            try { Wifi.SetAutoconfig(false); autoconfOff = true; }
-            catch (Exception ex) { Log.Warn("autoconfig 끄기 실패: " + ex.Message); }
-            try { Wifi.Disconnect(); } catch (Exception ex) { Log.Warn("WlanDisconnect 실패: " + ex.Message); }
-            var st = Wifi.WaitFor(s => !s.IsConnected && !s.IsTransitioning, TimeSpan.FromSeconds(8), ct);
-            Log.Info("와이파이 끊은 뒤 상태: " + st);
-            if (st.IsConnected || !autoconfOff)
+            WifiState st = null;
+            for (int attempt = 1; attempt <= 2; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                uint rc = ERROR_SUCCESS;
+                try { rc = Wifi.Disconnect(); } catch (Exception ex) { Log.Warn("WlanDisconnect 실패: " + ex.Message); }
+                if (rc == ERROR_NOT_SUPPORTED)
+                {
+                    // Auto-config was already off. Hand the interface back for a moment so the disconnect is accepted.
+                    try { Wifi.SetAutoconfig(true); rc = Wifi.Disconnect(); }
+                    catch (Exception ex) { Log.Warn("자동구성 켠 뒤 끊기 실패: " + ex.Message); }
+                }
+                autoconfOff = false;
+                try { Wifi.SetAutoconfig(false); autoconfOff = true; }
+                catch (Exception ex) { Log.Warn("autoconfig 끄기 실패: " + ex.Message); }
+
+                st = Wifi.WaitFor(s => !s.IsConnected && !s.IsTransitioning, TimeSpan.FromSeconds(attempt == 1 ? 4 : 5), ct);
+                Log.Info("와이파이 끊은 뒤 상태(" + attempt + "차): " + st);
+                if (!st.IsConnected && !st.IsTransitioning) break;
+            }
+            if (st == null || st.IsConnected || st.IsTransitioning || !autoconfOff)
             {
                 // Either the disconnect did not take, or Windows is still allowed to auto-reconnect
                 // (e.g. group policy denies the autoconf setting). Fall back to taking the adapter down:
                 // slower to bring back, but it cannot overlap with the wire.
-                Log.Warn(st.IsConnected ? "와이파이가 계속 연결되어 있어 어댑터를 끕니다" : "자동 재연결을 막지 못해 와이파이 어댑터를 끕니다");
+                Log.Warn(autoconfOff ? "와이파이가 계속 연결되어 있어 어댑터를 끕니다" : "자동 재연결을 막지 못해 와이파이 어댑터를 끕니다");
                 AdapterControl.Disable(WifiGuid);
                 AdapterControl.WaitFor(WifiGuid, a => a.IsDisabled, TimeSpan.FromSeconds(10), ct);
             }
@@ -631,7 +737,7 @@ namespace NetSwitch.Net
 
             // Give Windows' own auto-connect a short head start; it usually picks the right network at once.
             Report("와이파이 연결 중…");
-            var st = Wifi.WaitFor(s => s.IsConnected, TimeSpan.FromSeconds(4), ct);
+            var st = Wifi.WaitFor(s => s.IsConnected, TimeSpan.FromSeconds(1), ct);
 
             if (!st.IsConnected)
             {
@@ -709,10 +815,10 @@ namespace NetSwitch.Net
                     CutWifi(ct);
                     return "업무망 모드인데 와이파이가 다시 연결되어 끊었습니다.";
                 }
-                if (CurrentMode == NetMode.Wifi && o.EthernetEnabled)
+                if (CurrentMode == NetMode.Wifi && WireActive(o))
                 {
                     Log.Warn("감시: 인터넷 모드인데 유선 랜이 켜져 있음 -> 끔");
-                    AdapterControl.Disable(EthernetGuid);
+                    WireOff(ct);
                     return "인터넷 모드인데 유선 랜이 켜져 있어 다시 껐습니다.";
                 }
                 return null;
@@ -744,7 +850,7 @@ namespace NetSwitch.Net
                 catch (Exception ex) { Log.Warn("autoconfig 켜기 실패: " + ex.Message); }
                 if (EthernetGuid != Guid.Empty)
                 {
-                    try { var e = NetAdapterInfo.QueryByGuid(EthernetGuid); if (e != null && e.IsDisabled) AdapterControl.Enable(EthernetGuid); }
+                    try { if (NetAdapterInfo.QueryByGuid(EthernetGuid) != null) WireOn(ct); }
                     catch (Exception ex) { Log.Warn("유선 어댑터 켜기 실패: " + ex.Message); }
                 }
                 CurrentMode = NetMode.Unknown;

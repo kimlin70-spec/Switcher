@@ -21,6 +21,14 @@ namespace NetSwitch
         Adapter = 1
     }
 
+    internal enum EthernetMethod
+    {
+        /// <summary>Keep the device running and remove its IPv4/IPv6 bindings (default; safe for USB adapters, fast).</summary>
+        Binding = 0,
+        /// <summary>Disable the whole device (the adapter shows as "사용 안 함").</summary>
+        Adapter = 1
+    }
+
     /// <summary>
     /// Plain key=value settings file in %LOCALAPPDATA%\NetSwitch\config.txt.
     /// Written by the app; a user may edit it in a text editor while the app is closed.
@@ -39,6 +47,11 @@ namespace NetSwitch
         {
             get => string.Equals(Get("wifi_method"), "adapter", StringComparison.OrdinalIgnoreCase) ? WifiMethod.Adapter : WifiMethod.Autoconfig;
             set => Set("wifi_method", value == WifiMethod.Adapter ? "adapter" : "autoconfig");
+        }
+        public EthernetMethod EthernetMethod
+        {
+            get => string.Equals(Get("ethernet_method"), "adapter", StringComparison.OrdinalIgnoreCase) ? EthernetMethod.Adapter : EthernetMethod.Binding;
+            set => Set("ethernet_method", value == EthernetMethod.Adapter ? "adapter" : "binding");
         }
         /// <summary>Optional pin of the wired adapter by connection name (e.g. "이더넷") or interface GUID.</summary>
         public string EthernetAdapter { get => Get("ethernet_adapter"); set => Set("ethernet_adapter", value); }
@@ -128,6 +141,7 @@ namespace NetSwitch
                 sb.AppendLine("# NetSwitch 설정 파일. 프로그램을 종료한 뒤 편집하세요.");
                 sb.AppendLine("# wifi_profile      : 인터넷으로 돌아올 때 연결할 와이파이 프로필 이름(비우면 마지막에 쓰던 와이파이)");
                 sb.AppendLine("# wifi_method       : autoconfig(기본, 빠름) 또는 adapter(와이파이 장치를 통째로 끔)");
+                sb.AppendLine("# ethernet_method   : binding(기본, 장치는 켜 둔 채 IP만 뗌. USB 랜에 안전) 또는 adapter(유선 랜 장치를 통째로 끔)");
                 sb.AppendLine("# ethernet_adapter  : 유선 랜 어댑터 지정(연결 이름 또는 GUID, 보통 비워 둠)");
                 sb.AppendLine("# wifi_adapter      : 와이파이 어댑터 지정(연결 이름 또는 GUID, 보통 비워 둠)");
                 sb.AppendLine("# link_wait_sec     : 유선 랜을 켠 뒤 랜선 연결(링크)을 기다리는 최대 시간(초)");

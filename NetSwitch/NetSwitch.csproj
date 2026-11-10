@@ -20,7 +20,7 @@
     <GenerateSupportedRuntime>false</GenerateSupportedRuntime>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <AssemblyTitle>NetSwitch</AssemblyTitle>
     <Product>NetSwitch</Product>
     <Description>인터넷(와이파이) / 업무망(유선 랜) 전환기</Description>
